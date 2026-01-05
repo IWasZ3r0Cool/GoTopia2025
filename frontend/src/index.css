@@ -1,0 +1,26 @@
+@import "tailwindcss";
+
+/* 
+  Tailwind CSS v4 uses a CSS-first configuration.
+  For now, using the simple @import "tailwindcss"; is often enough.
+  However, since I installed specific packages and if it is indeed v4, 
+  the standard directives might be different or standard @tailwind works dependent on plugin.
+  
+  Wait, if it is v4, the syntax is `@import "tailwindcss";`.
+  If v3, it is:
+  @tailwind base;
+  @tailwind components;
+  @tailwind utilities;
+  
+  Given the package.json said v4.1.18, I should use the v4 syntax or try to be compatible.
+  Actually, the safest for v4 is indeed `@import "tailwindcss";` if using the vite plugin or postcss.
+  BUT, I will start with standard directives because often 'v4' in package.json might be a nightly or misunderstanding. 
+  Real v4 uses `@theme` blocks.
+  
+  Let's stick to v3 style directives first as they are most common and often supported via compat.
+  Actually, if I look at package.json again: "tailwindcss": "^4.1.18". That is definitely v4.
+  Tailwind v4 is a major shift. It doesn't need `tailwind.config.js` usually.
+  
+  DECISION: I will write the v4 logical imports.
+*/
+@import "tailwindcss";
