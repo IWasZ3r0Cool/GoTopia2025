@@ -1,7 +1,15 @@
 import { configureStore } from '@reduxjs/toolkit'
+import gameReducer from './gameSlice'
+import userReducer from './userSlice'
+import { websocketMiddleware } from './middleware'
 
 export const store = configureStore({
-    reducer: {},
+    reducer: {
+        game: gameReducer,
+        user: userReducer,
+    },
+    middleware: (getDefaultMiddleware) =>
+        getDefaultMiddleware().concat(websocketMiddleware),
 })
 
 // Infer the `RootState` and `AppDispatch` types from the store itself
