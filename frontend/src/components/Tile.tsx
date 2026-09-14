@@ -1,51 +1,30 @@
-import type { Building, BuildingType } from '../types/game'
+import type { Building } from '../types/game'
+import { BUILDINGS } from '../types/game'
 
 interface TileProps {
-    x: number;
-    y: number;
-    building?: Building;
-    onBuild: (x: number, y: number) => void;
-    isSelected: boolean;
+  x: number
+  y: number
+  building?: Building
+  onSelect: (x: number, y: number) => void
+  isSelected: boolean
+  interactive?: boolean
 }
 
-const getBuildingColor = (type?: BuildingType) => {
-    switch (type) {
-        case "HOUSE": return "bg-blue-500 shadow-blue-500/50";
-        case "FACTORY": return "bg-amber-600 shadow-amber-600/50";
-        case "FARM": return "bg-green-500 shadow-green-500/50";
-        case "FORT": return "bg-stone-700 shadow-stone-700/50";
-        case "SCHOOL": return "bg-purple-500 shadow-purple-500/50";
-        case "HOSPITAL": return "bg-red-500 shadow-red-500/50";
-        default: return "bg-emerald-200 hover:bg-emerald-300"; // Grass
-    }
-}
+export function Tile({ x, y, building, onSelect, isSelected, interactive = true }: TileProps) {
+  const definition = building ? BUILDINGS.find((item) => item.type === building.type) : undefined
+  const label = building ? `${definition?.name ?? building.type} at ${x}, ${y}` : `Empty tile at ${x}, ${y}`
 
-const getBuildingIcon = (type?: BuildingType) => {
-    switch (type) {
-        case "HOUSE": return "🏠";
-        case "FACTORY": return "🏭";
-        case "FARM": return "🌾";
-        case "FORT": return "🏰";
-        case "SCHOOL": return "🏫";
-        case "HOSPITAL": return "🏥";
-        default: return "";
-    }
-}
-
-export const Tile = ({ x, y, building, onBuild, isSelected }: TileProps) => {
-    const baseClass = "w-8 h-8 m-0.5 rounded cursor-pointer transition-all duration-200 flex items-center justify-center text-sm shadow-md";
-    const colorClass = getBuildingColor(building?.type);
-    const borderClass = isSelected ? "ring-2 ring-white scale-110 z-10" : "";
-
-    return (
-        <div
-            className={`${baseClass} ${colorClass} ${borderClass}`}
-            onClick={() => onBuild(x, y)}
-            title={`(${x},${y}) ${building?.type || "Empty"}`}
-            role="button"
-            aria-label={`Tile ${x},${y}`}
-        >
-            {getBuildingIcon(building?.type)}
-        </div>
-    )
+  return (
+    <button
+      type="button"
+      className={`tile${building ? ` tile-${building.type.toLowerCase()}` : ''}${isSelected ? ' is-selected' : ''}`}
+      onClick={() => onSelect(x, y)}
+      aria-label={label}
+      aria-pressed={isSelected}
+      disabled={!interactive}
+      title={label}
+    >
+      {definition?.icon && <span aria-hidden="true">{definition.icon}</span>}
+    </button>
+  )
 }

@@ -1,60 +1,77 @@
-import { render, screen, fireEvent } from '@testing-library/react'
-import { describe, it, expect, vi as jest } from 'vitest'
-import { Tile } from './Tile'
+import { fireEvent, render, screen } from '@testing-library/react'
+import { describe, expect, it, vi } from 'vitest'
 import { ControlPanel } from './ControlPanel'
+import { IslandGrid } from './IslandGrid'
+import { JoinScreen } from './JoinScreen'
+import { Tile } from './Tile'
 
-describe('Tile Component', () => {
-    it('renders without crashing', () => {
-        render(<Tile x={10} y={10} onBuild={() => { }} isSelected={false} />);
-        const tile = screen.getByRole('button', { name: /Tile 10,10/i });
-        expect(tile).toBeInTheDocument();
-    });
+const player = { id: 'player-1', name: 'Ada', gold: 1000, population: 100, populationCapacity: 100, mood: 100 }
 
-    it('shows building icon', () => {
-        // @ts-ignore
-        render(<Tile x={10} y={10} building={{ type: "HOUSE", health: 100 }} onBuild={() => { }} isSelected={false} />);
-        const tile = screen.getByRole('button', { name: /Tile 10,10/i });
-        expect(tile).toHaveTextContent('🏠');
-    });
+describe('Tile', () => {
+  it('is keyboard-accessible and reports its contents', () => {
+    render(<Tile x={10} y={10} building={{ type: 'HOUSE', health: 100 }} onSelect={() => undefined} isSelected />)
+    const tile = screen.getByRole('button', { name: 'House at 10, 10' })
+    expect(tile).toHaveAttribute('aria-pressed', 'true')
+    expect(tile).toHaveTextContent('⌂')
+  })
 
-    it('calls onBuild when clicked', () => {
-        const handleClick = jest.fn();
-        render(<Tile x={10} y={10} onBuild={handleClick} isSelected={false} />);
-        const tile = screen.getByRole('button', { name: /Tile 10,10/i });
-        fireEvent.click(tile);
-        expect(handleClick).toHaveBeenCalledWith(10, 10);
-    });
-});
+  it('selects its coordinates', () => {
+    const onSelect = vi.fn()
+    render(<Tile x={12} y={14} onSelect={onSelect} isSelected={false} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Empty tile at 12, 14' }))
+    expect(onSelect).toHaveBeenCalledWith(12, 14)
+  })
+})
 
-describe('ControlPanel Component', () => {
-    const mockPlayer = {
-        id: "P1",
-        gold: 1000,
-        population: 50,
-        mood: 100
-    };
+describe('IslandGrid', () => {
+  it('keeps interactive tiles usable inside a scrollable map', () => {
+    render(
+      <IslandGrid
+        island={{ ownerId: 'player-1', x: 10, y: 10, width: 25, height: 25, buildings: {} }}
+        ownerName="Ada"
+        onTileClick={() => undefined}
+      />,
+    )
 
-    it('renders player stats', () => {
-        render(<ControlPanel player={mockPlayer} selectedTile={null} onBuild={() => { }} />);
-        expect(screen.getByTestId('stat-gold')).toHaveTextContent('1000');
-    });
+    expect(screen.getByRole('region', { name: 'Scrollable island map' })).toHaveAttribute('tabindex', '0')
+    expect(screen.getByTestId('island-grid-player-1')).toHaveStyle({ minWidth: '900px' })
+  })
+})
 
-    it('disables build buttons when no tile selected', () => {
-        render(<ControlPanel player={mockPlayer} selectedTile={null} onBuild={() => { }} />);
-        const houseBtn = screen.getByTestId('build-btn-HOUSE');
-        expect(houseBtn).toBeDisabled();
-    });
+describe('ControlPanel', () => {
+  it('renders formatted stats and requires a selection', () => {
+    render(<ControlPanel player={player} selectedTile={null} onBuild={() => undefined} />)
+    expect(screen.getByTestId('stat-gold')).toHaveTextContent('1,000')
+    expect(screen.getByTestId('build-btn-HOUSE')).toBeDisabled()
+  })
 
-    it('enables build buttons when tile selected', () => {
-        render(<ControlPanel player={mockPlayer} selectedTile={{ x: 10, y: 10 }} onBuild={() => { }} />);
-        const houseBtn = screen.getByTestId('build-btn-HOUSE');
-        expect(houseBtn).not.toBeDisabled();
-    });
+  it('allows an affordable building on an empty selected tile', () => {
+    render(<ControlPanel player={player} selectedTile={{ x: 10, y: 10 }} onBuild={() => undefined} />)
+    expect(screen.getByTestId('build-btn-HOUSE')).toBeEnabled()
+  })
 
-    it('disables expensive buttons', () => {
-        const poorPlayer = { ...mockPlayer, gold: 0 };
-        render(<ControlPanel player={poorPlayer} selectedTile={{ x: 10, y: 10 }} onBuild={() => { }} />);
-        const houseBtn = screen.getByTestId('build-btn-HOUSE'); // Cost 150
-        expect(houseBtn).toBeDisabled();
-    });
-});
+  it('prevents building on an occupied tile or without enough gold', () => {
+    const { rerender } = render(
+      <ControlPanel player={player} selectedTile={{ x: 10, y: 10 }} selectedBuilding={{ type: 'FARM', health: 100 }} onBuild={() => undefined} />,
+    )
+    expect(screen.getByTestId('build-btn-HOUSE')).toBeDisabled()
+
+    rerender(<ControlPanel player={{ ...player, gold: 0 }} selectedTile={{ x: 11, y: 10 }} onBuild={() => undefined} />)
+    expect(screen.getByTestId('build-btn-HOUSE')).toBeDisabled()
+  })
+})
+
+describe('JoinScreen', () => {
+  it('trims and submits a player name', () => {
+    const onJoin = vi.fn()
+    render(<JoinScreen status="idle" error={null} onJoin={onJoin} />)
+    fireEvent.change(screen.getByLabelText('Ruler name'), { target: { value: '  Grace  ' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Set sail' }))
+    expect(onJoin).toHaveBeenCalledWith('Grace')
+  })
+
+  it('shows connection errors', () => {
+    render(<JoinScreen status="idle" error="Server unavailable" onJoin={() => undefined} />)
+    expect(screen.getByRole('alert')).toHaveTextContent('Server unavailable')
+  })
+})

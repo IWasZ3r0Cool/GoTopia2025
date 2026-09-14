@@ -1,97 +1,146 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log"
-	"sync"
+	"strings"
 
 	"github.com/IWasZ3r0Cool/GoTopia2025/internal/game"
 )
 
-type Hub struct {
-	Clients    map[*Client]bool
-	Broadcast  chan []byte
-	Register   chan *Client
-	Unregister chan *Client
+var (
+	errAlreadyJoined = errors.New("client has already joined")
+	errNameTooLong   = errors.New("player name must be 24 characters or fewer")
+	errHubStopped    = errors.New("game server has stopped")
+)
 
-	GameEngine *game.GameEngine
-	mutex      sync.Mutex
+type joinRequest struct {
+	client *Client
+	name   string
+	result chan error
 }
 
-func NewHub(ge *game.GameEngine) *Hub {
+type Hub struct {
+	engine     *game.GameEngine
+	clients    map[*Client]struct{}
+	register   chan *Client
+	unregister chan *Client
+	join       chan joinRequest
+	done       chan struct{}
+	nextID     uint64
+}
+
+func NewHub(engine *game.GameEngine) *Hub {
 	return &Hub{
-		Broadcast:  make(chan []byte),
-		Register:   make(chan *Client),
-		Unregister: make(chan *Client),
-		Clients:    make(map[*Client]bool),
-		GameEngine: ge,
+		engine: engine, clients: make(map[*Client]struct{}),
+		register: make(chan *Client), unregister: make(chan *Client),
+		join: make(chan joinRequest), done: make(chan struct{}),
 	}
 }
 
-func (h *Hub) Run() {
-	// Start the game engine loop concurrently
-	h.GameEngine.Start()
-
-	// In a real app, we'd have a ticker here to broadcast state periodically or on change.
-	// For now, we'll hook into the GameEngine.
-	// The GameEngine creates ticks. We might need to poll it or have it push to us.
-	// Simpler: Just rely on incoming messages or a ticker here to broadcast state.
-
-	// Let's broadcast state on every meaningful action or periodically.
-	// For 200ms ticks, maybe broadcast every tick?
-	// To do this cleanly, let's just loop.
+// Run owns the client collection and blocks until the context is cancelled.
+func (h *Hub) Run(ctx context.Context) {
+	h.engine.Start(ctx)
+	defer h.engine.Stop()
+	defer close(h.done)
 
 	for {
 		select {
-		case client := <-h.Register:
-			h.mutex.Lock()
-			h.Clients[client] = true
-			h.mutex.Unlock()
-
-			// Assign player ID (simple UUID/Timestamp or just use memory address for now... wait, Client needs ID)
-			// h.GameEngine.AddPlayer(client.ID) -> Assumes Client checks Join message.
-			log.Printf("Client registered: %s", client.conn.RemoteAddr())
-
-		case client := <-h.Unregister:
-			h.mutex.Lock()
-			if _, ok := h.Clients[client]; ok {
-				delete(h.Clients, client)
-				close(client.send)
+		case <-ctx.Done():
+			for client := range h.clients {
+				client.closeConnection()
 			}
-			h.mutex.Unlock()
+			return
 
-		case message := <-h.Broadcast:
-			h.mutex.Lock()
-			for client := range h.Clients {
-				select {
-				case client.send <- message:
-				default:
-					close(client.send)
-					delete(h.Clients, client)
-				}
+		case client := <-h.register:
+			h.clients[client] = struct{}{}
+
+		case client := <-h.unregister:
+			if _, exists := h.clients[client]; !exists {
+				continue
 			}
-			h.mutex.Unlock()
+			delete(h.clients, client)
+			client.closeConnection()
+			if client.ID != "" {
+				h.engine.RemovePlayer(client.ID)
+			}
+
+		case request := <-h.join:
+			request.result <- h.handleJoin(request.client, request.name)
+
+		case <-h.engine.Updates():
+			h.broadcastState()
 		}
 	}
 }
 
-func (h *Hub) BroadcastState() {
-	state := h.GameEngine.GetState()
-
-	// Wrap in message
-	msg := struct {
-		Type    string         `json:"type"`
-		Payload game.GameState `json:"payload"`
-	}{
-		Type:    "GAME_STATE",
-		Payload: state,
+func (h *Hub) handleJoin(client *Client, name string) error {
+	name = strings.TrimSpace(name)
+	if client.ID != "" {
+		return errAlreadyJoined
 	}
+	if len([]rune(name)) > 24 {
+		return errNameTooLong
+	}
+	h.nextID++
+	playerID := fmt.Sprintf("player-%d", h.nextID)
+	if err := h.engine.AddPlayer(playerID, name); err != nil {
+		return err
+	}
+	client.ID = playerID
+	client.sendJSON(outgoingMessage{Type: MsgWelcome, Payload: WelcomePayload{PlayerID: playerID}})
+	return nil
+}
 
-	bytes, err := json.Marshal(msg)
+func (h *Hub) joinGame(client *Client, name string) error {
+	request := joinRequest{client: client, name: name, result: make(chan error, 1)}
+	select {
+	case h.join <- request:
+	case <-h.done:
+		return errHubStopped
+	}
+	select {
+	case err := <-request.result:
+		return err
+	case <-h.done:
+		return errHubStopped
+	}
+}
+
+func (h *Hub) addClient(client *Client) bool {
+	select {
+	case h.register <- client:
+		return true
+	case <-h.done:
+		return false
+	}
+}
+
+func (h *Hub) removeClient(client *Client) {
+	select {
+	case h.unregister <- client:
+	case <-h.done:
+	}
+}
+
+func (h *Hub) broadcastState() {
+	encoded, err := json.Marshal(outgoingMessage{Type: MsgGameState, Payload: h.engine.Snapshot()})
 	if err != nil {
-		log.Printf("Error marshalling state: %v", err)
+		log.Printf("encode game state: %v", err)
 		return
 	}
-
-	h.Broadcast <- bytes
+	for client := range h.clients {
+		select {
+		case client.send <- encoded:
+		default:
+			client.closeConnection()
+			delete(h.clients, client)
+			if client.ID != "" {
+				h.engine.RemovePlayer(client.ID)
+			}
+		}
+	}
 }

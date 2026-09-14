@@ -1,11 +1,5 @@
 package game
 
-// Coordinate represents a position on the 2D grid
-type Coordinate struct {
-	X int `json:"x"`
-	Y int `json:"y"`
-}
-
 type BuildingType string
 
 const (
@@ -22,30 +16,28 @@ type Building struct {
 	Health int          `json:"health"`
 }
 
-// Island represents a player's territory
 type Island struct {
 	OwnerID   string              `json:"ownerId"`
-	Buildings map[string]Building `json:"buildings"` // Key format: "x,y"
-	// Island Bounds
-	X      int `json:"x"`
-	Y      int `json:"y"`
-	Width  int `json:"width"`
-	Height int `json:"height"`
+	Buildings map[string]Building `json:"buildings"`
+	X         int                 `json:"x"`
+	Y         int                 `json:"y"`
+	Width     int                 `json:"width"`
+	Height    int                 `json:"height"`
 }
 
 type Player struct {
-	ID         string `json:"id"`
-	Gold       int    `json:"gold"`
-	Population int    `json:"population"`
-	Mood       int    `json:"mood"` // Happiness 0-100
+	ID                 string `json:"id"`
+	Name               string `json:"name"`
+	Gold               int    `json:"gold"`
+	Population         int    `json:"population"`
+	PopulationCapacity int    `json:"populationCapacity"`
+	Mood               int    `json:"mood"`
 }
 
-// GameState holds the entire synchronized state of the world
 type GameState struct {
 	MapWidth  int                `json:"mapWidth"`
 	MapHeight int                `json:"mapHeight"`
-	Islands   map[string]*Island `json:"islands"` // Keyed by PlayerID
-	Players   map[string]*Player `json:"players"` // Keyed by PlayerID
-	Turn      int                `json:"turn"`    // Current turn number
-	Round     int                `json:"round"`   // Current round (maybe redundant with Turn, depending on logic)
+	Islands   map[string]*Island `json:"islands"`
+	Players   map[string]*Player `json:"players"`
+	Turn      int                `json:"turn"`
 }

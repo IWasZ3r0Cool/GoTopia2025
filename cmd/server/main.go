@@ -1,34 +1,54 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"log"
 	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"github.com/IWasZ3r0Cool/GoTopia2025/internal/game"
-	"github.com/IWasZ3r0Cool/GoTopia2025/internal/server"
+	gameserver "github.com/IWasZ3r0Cool/GoTopia2025/internal/server"
 )
 
 func main() {
-	log.Println("Starting GoTopia2025 Server...")
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
-	// 1. Initialize Game Engine
-	gameEngine := game.NewGameEngine()
+	engine := game.NewGameEngine()
+	hub := gameserver.NewHub(engine)
+	go hub.Run(ctx)
 
-	// 2. Initialize WebSocket Hub
-	hub := server.NewHub(gameEngine)
-	go hub.Run()
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+	staticDir := os.Getenv("GOTOPIA_STATIC_DIR")
+	if staticDir == "" {
+		staticDir = "frontend/dist"
+	}
 
-	// 3. Setup Routes
-	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
-		server.ServeWs(hub, w, r)
-	})
+	httpServer := &http.Server{
+		Addr:              ":" + port,
+		Handler:           gameserver.NewHTTPHandler(hub, staticDir),
+		ReadHeaderTimeout: 5 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
 
-	// Optional: Serve frontend static files if we build them into 'dist'
-	// fs := http.FileServer(http.Dir("./frontend/dist"))
-	// http.Handle("/", fs)
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := httpServer.Shutdown(shutdownCtx); err != nil {
+			log.Printf("shutdown server: %v", err)
+		}
+	}()
 
-	log.Println("Server listening on :8080")
-	if err := http.ListenAndServe(":8080", nil); err != nil {
-		log.Fatal("ListenAndServe: ", err)
+	log.Printf("GoTopia server listening on http://localhost:%s", port)
+	if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		log.Fatal(err)
 	}
 }

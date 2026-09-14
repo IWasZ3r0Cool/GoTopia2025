@@ -1,74 +1,123 @@
-import { useState, useEffect } from 'react'
-import { useAppSelector, useAppDispatch } from '../store/hooks'
-import { connectToGame, buildBuilding } from '../store/middleware'
-import { IslandGrid } from './IslandGrid'
+import { useMemo, useState } from 'react'
+import { useAppDispatch, useAppSelector } from '../store/hooks'
+import { buildBuilding, connectToGame, disconnectFromGame } from '../store/middleware'
+import { setError } from '../store/userSlice'
 import { ControlPanel } from './ControlPanel'
+import { IslandGrid } from './IslandGrid'
+import { JoinScreen } from './JoinScreen'
+import { Scoreboard } from './Scoreboard'
 import type { BuildingType } from '../types/game'
 
-export const GameOverlay = () => {
-    const dispatch = useAppDispatch();
-    const { data: gameState } = useAppSelector(state => state.game);
-    const { playerId, isConnected } = useAppSelector(state => state.user);
+export function GameOverlay() {
+  const dispatch = useAppDispatch()
+  const gameState = useAppSelector((state) => state.game.data)
+  const { playerId, status, error } = useAppSelector((state) => state.user)
+  const [selection, setSelection] = useState<{ playerId: string; x: number; y: number } | null>(null)
+  const selectedTile = selection?.playerId === playerId ? selection : null
 
-    // Local selection state
-    const [selectedTile, setSelectedTile] = useState<{ x: number, y: number } | null>(null);
+  const players = useMemo(() => Object.values(gameState?.players ?? {}), [gameState])
 
-    useEffect(() => {
-        // Auto connect on mount
-        if (!isConnected) {
-            dispatch(connectToGame("Player_" + Math.floor(Math.random() * 1000)));
-        }
-    }, [dispatch, isConnected]);
-
-    if (!isConnected || !gameState) {
-        return (
-            <div className="min-h-screen bg-gray-900 flex items-center justify-center text-white flex-col gap-4">
-                <div className="animate-spin text-4xl">🌀</div>
-                <h1 className="text-2xl font-light tracking-widest uppercase">Connecting to GoTopia...</h1>
-            </div>
-        );
-    }
-
-    const islandKeys = Object.keys(gameState.islands);
-
+  if (status === 'idle' || (status === 'connecting' && !gameState)) {
     return (
-        <div className="min-h-screen bg-slate-900 overflow-auto pb-32 relative">
-            {/* Header Info */}
-            <div className="absolute top-4 left-0 right-0 text-center pointer-events-none z-10">
-                <div className="inline-block bg-black/50 backdrop-blur-md px-6 py-2 rounded-full border border-white/10 text-white font-mono shadow-lg">
-                    Turn: <span className="text-green-400 font-bold">{gameState.turn}</span>
-                    <span className="mx-4 text-gray-500">|</span>
-                    Player: <span className="text-blue-400 font-bold">{playerId}</span>
-                </div>
-            </div>
-
-            {/* Map Area */}
-            <div className="grid grid-cols-2 gap-8 p-12 min-w-fit mx-auto justify-items-center items-center h-full">
-                {islandKeys.map(key => (
-                    <div key={key} className={key === playerId ? "ring-4 ring-yellow-400 rounded-xl" : "opacity-80 hover:opacity-100 transition-opacity"}>
-                        <IslandGrid
-                            island={gameState.islands[key]}
-                            onTileClick={(x, y) => {
-                                // Only allow selecting MY island tiles
-                                if (key === playerId) {
-                                    setSelectedTile({ x, y });
-                                }
-                            }}
-                            selectedTile={selectedTile}
-                        />
-                    </div>
-                ))}
-            </div>
-
-            <ControlPanel
-                player={playerId && gameState.players[playerId] ? gameState.players[playerId] : null}
-                selectedTile={selectedTile}
-                onBuild={(type: BuildingType) => {
-                    if (selectedTile) {
-                        dispatch(buildBuilding(type, selectedTile.x, selectedTile.y));
-                    }
-                }}
-            />
-        </div>
+      <JoinScreen
+        status={status}
+        error={error}
+        onJoin={(name) => dispatch(connectToGame(name))}
+      />
     )
+  }
+
+  const player = playerId ? gameState?.players[playerId] : undefined
+  const island = playerId ? gameState?.islands[playerId] : undefined
+  if (!gameState || !playerId || !player || !island) {
+    return (
+      <main className="loading-screen" aria-live="polite">
+        <div className="loading-mark" aria-hidden="true">≈</div>
+        {error ? (
+          <>
+            <p className="eyebrow">Unable to join</p>
+            <h1>{error}</h1>
+          </>
+        ) : (
+          <>
+            <p className="eyebrow">Charting the waters</p>
+            <h1>Preparing your island…</h1>
+          </>
+        )}
+        <button type="button" className="text-button" onClick={() => dispatch(disconnectFromGame())}>
+          {error ? 'Back' : 'Cancel'}
+        </button>
+      </main>
+    )
+  }
+
+  const selectedKey = selectedTile ? `${selectedTile.x},${selectedTile.y}` : ''
+  const selectedBuilding = island.buildings[selectedKey]
+  const opponents = players.filter((candidate) => candidate.id !== playerId)
+
+  function build(type: BuildingType) {
+    if (!selectedTile || selectedBuilding) return
+    dispatch(setError(null))
+    dispatch(buildBuilding({ buildingType: type, x: selectedTile.x, y: selectedTile.y }))
+  }
+
+  return (
+    <div className="game-shell">
+      <header className="game-header">
+        <a className="wordmark" href="/" aria-label="GoTopia home"><span>G</span> GoTopia</a>
+        <div className="turn-indicator"><span>Turn</span><strong>{gameState.turn}</strong></div>
+        <div className="header-actions">
+          <span className="connection-pill"><i /> Live · {players.length}/4 rulers</span>
+          <button type="button" className="text-button" onClick={() => dispatch(disconnectFromGame())}>Leave game</button>
+        </div>
+      </header>
+
+      {error && (
+        <div className="toast" role="alert">
+          <span>{error}</span>
+          <button type="button" aria-label="Dismiss error" onClick={() => dispatch(setError(null))}>×</button>
+        </div>
+      )}
+
+      <main className="game-content">
+        <div className="game-board-column">
+          <IslandGrid
+            island={island}
+            ownerName={player.name}
+            onTileClick={(x, y) => setSelection({ playerId, x, y })}
+            selectedTile={selectedTile}
+          />
+
+          {opponents.length > 0 && (
+            <section className="opponent-section" aria-labelledby="opponents-title">
+              <div className="panel-heading">
+                <p className="eyebrow">World view</p>
+                <h2 id="opponents-title">Neighboring islands</h2>
+              </div>
+              <div className="opponent-grid">
+                {opponents.map((opponent) => (
+                  <IslandGrid
+                    key={opponent.id}
+                    island={gameState.islands[opponent.id]}
+                    ownerName={opponent.name}
+                    compact
+                  />
+                ))}
+              </div>
+            </section>
+          )}
+        </div>
+
+        <div className="sidebar-column">
+          <ControlPanel
+            player={player}
+            selectedTile={selectedTile}
+            selectedBuilding={selectedBuilding}
+            onBuild={build}
+          />
+          <Scoreboard players={players} currentPlayerId={playerId} />
+        </div>
+      </main>
+    </div>
+  )
 }
