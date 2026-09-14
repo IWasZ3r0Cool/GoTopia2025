@@ -24,6 +24,10 @@ profile.cov
 go.work
 go.work.sum
 
+# Local builds
+/bin/
+/server
+
 # env file
 .env
 

@@ -1,88 +1,119 @@
-import type { Middleware, UnknownAction } from 'redux'
-import { updateGameState } from './gameSlice'
-import { setConnected, setError } from './userSlice'
-import type { WSMessage } from '../types/game'
+import { createAction, type Middleware } from '@reduxjs/toolkit'
+import { clearGameState, updateGameState } from './gameSlice'
+import { connectionClosed, connectionOpened, connectionStarted, setError, setPlayerId } from './userSlice'
+import type { BuildingType, ServerMessage } from '../types/game'
 
-// Check for custom action types
-interface CustomAction extends UnknownAction {
-    payload?: any;
+export const connectToGame = createAction<string>('websocket/connect')
+export const disconnectFromGame = createAction('websocket/disconnect')
+export const buildBuilding = createAction<{ buildingType: BuildingType; x: number; y: number }>('game/build')
+
+type SocketFactory = (url: string) => WebSocket
+
+export function websocketURL(): string {
+  const configured = import.meta.env.VITE_WS_URL as string | undefined
+  if (configured) return configured
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+  return `${protocol}//${window.location.host}/ws`
 }
 
-export const websocketMiddleware: Middleware = store => {
-    let socket: WebSocket | null = null;
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null
+}
 
-    return next => (action: unknown) => {
-        const typedAction = action as CustomAction;
-        // Defines middleware actions
-        if (typedAction.type === 'WS_CONNECT') {
-            if (socket !== null) {
-                socket.close();
-            }
+function isServerMessage(value: unknown): value is ServerMessage {
+  if (!isRecord(value) || !isRecord(value.payload)) return false
+  switch (value.type) {
+    case 'WELCOME':
+      return typeof value.payload.playerId === 'string'
+    case 'ERROR':
+      return typeof value.payload.code === 'string' && typeof value.payload.message === 'string'
+    case 'GAME_STATE':
+      return (
+        typeof value.payload.mapWidth === 'number'
+        && typeof value.payload.mapHeight === 'number'
+        && typeof value.payload.turn === 'number'
+        && isRecord(value.payload.players)
+        && isRecord(value.payload.islands)
+      )
+    default:
+      return false
+  }
+}
 
-            // Connect to localhost:8080 (or config)
-            socket = new WebSocket('ws://localhost:8080/ws');
+export const createWebsocketMiddleware = (
+  createSocket: SocketFactory = (url) => new WebSocket(url),
+  getURL: () => string = websocketURL,
+): Middleware => (store) => {
+  let socket: WebSocket | null = null
 
-            socket.onopen = () => {
-                store.dispatch(setConnected(true));
-                store.dispatch(setError(null));
+  return (next) => (action) => {
+    const result = next(action)
 
-                // Join Game automatically for now with random name or prompted
-                const name = typedAction.payload || "Player_" + Math.floor(Math.random() * 1000);
-                socket?.send(JSON.stringify({
-                    type: "JOIN_GAME",
-                    payload: { name }
-                }));
-            };
+    if (connectToGame.match(action)) {
+      socket?.close(1000, 'Starting a new session')
+      store.dispatch(clearGameState())
+      store.dispatch(connectionStarted())
 
-            socket.onmessage = (event) => {
-                try {
-                    const msg: WSMessage = JSON.parse(event.data);
+      const nextSocket = createSocket(getURL())
+      socket = nextSocket
 
-                    switch (msg.type) {
-                        case "GAME_STATE":
-                            store.dispatch(updateGameState(msg.payload));
-                            break;
-                        case "ERROR":
-                            store.dispatch(setError(msg.payload.message));
-                            break;
-                        default:
-                            console.log("Unknown WS Message:", msg);
-                    }
-                } catch (e) {
-                    console.error("WS Parse Error", e);
-                }
-            };
+      nextSocket.onopen = () => {
+        if (socket !== nextSocket) return
+        store.dispatch(connectionOpened())
+        nextSocket.send(JSON.stringify({ type: 'JOIN_GAME', payload: { name: action.payload } }))
+      }
 
-            socket.onclose = () => {
-                store.dispatch(setConnected(false));
-            };
-
-            socket.onerror = () => {
-                store.dispatch(setError("WebSocket connection failed"));
-            };
-        } else if (typedAction.type === 'WS_SEND') {
-            if (socket && socket.readyState === WebSocket.OPEN) {
-                socket.send(JSON.stringify(typedAction.payload));
-            }
+      nextSocket.onmessage = (event) => {
+        if (socket !== nextSocket || typeof event.data !== 'string') return
+        try {
+          const message: unknown = JSON.parse(event.data)
+          if (!isServerMessage(message)) throw new Error('Invalid server message')
+          switch (message.type) {
+            case 'WELCOME':
+              store.dispatch(setPlayerId(message.payload.playerId))
+              break
+            case 'GAME_STATE':
+              store.dispatch(updateGameState(message.payload))
+              break
+            case 'ERROR':
+              store.dispatch(setError(message.payload.message))
+              break
+          }
+        } catch {
+          store.dispatch(setError('The server sent an unreadable response.'))
         }
-        // Actions to trigger specific Game Actions
-        else if (typedAction.type === 'GAME_BUILD') {
-            if (socket && socket.readyState === WebSocket.OPEN) {
-                socket.send(JSON.stringify({
-                    type: "BUILD",
-                    payload: typedAction.payload
-                }));
-            }
-        }
+      }
 
-        return next(action);
-    };
-};
+      nextSocket.onerror = () => {
+        if (socket === nextSocket) store.dispatch(setError('Could not connect to the game server.'))
+      }
 
-// Action creators for the middleware
-export const connectToGame = (playerName?: string) => ({ type: 'WS_CONNECT', payload: playerName });
-export const sendWSMessage = (msg: any) => ({ type: 'WS_SEND', payload: msg });
-export const buildBuilding = (type: string, x: number, y: number) => ({
-    type: 'GAME_BUILD',
-    payload: { buildingType: type, x, y }
-});
+      nextSocket.onclose = () => {
+        if (socket !== nextSocket) return
+        socket = null
+        store.dispatch(connectionClosed())
+        store.dispatch(clearGameState())
+      }
+    }
+
+    if (disconnectFromGame.match(action)) {
+      const activeSocket = socket
+      socket = null
+      activeSocket?.close(1000, 'Player left the game')
+      store.dispatch(connectionClosed())
+      store.dispatch(clearGameState())
+    }
+
+    if (buildBuilding.match(action)) {
+      if (!socket || socket.readyState !== WebSocket.OPEN) {
+        store.dispatch(setError('The game connection is not ready.'))
+      } else {
+        socket.send(JSON.stringify({ type: 'BUILD', payload: action.payload }))
+      }
+    }
+
+    return result
+  }
+}
+
+export const websocketMiddleware = createWebsocketMiddleware()

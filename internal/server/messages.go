@@ -1,22 +1,24 @@
 package server
 
-import "github.com/IWasZ3r0Cool/GoTopia2025/internal/game"
+import (
+	"encoding/json"
 
-// Message Types
+	"github.com/IWasZ3r0Cool/GoTopia2025/internal/game"
+)
+
 const (
 	MsgJoinGame  = "JOIN_GAME"
 	MsgBuild     = "BUILD"
+	MsgWelcome   = "WELCOME"
 	MsgGameState = "GAME_STATE"
 	MsgError     = "ERROR"
 )
 
-// BaseMessage acts as the envelope
-type BaseMessage struct {
-	Type    string      `json:"type"`
-	Payload interface{} `json:"payload,omitempty"`
+type incomingMessage struct {
+	Type    string          `json:"type"`
+	Payload json.RawMessage `json:"payload,omitempty"`
 }
 
-// ClientPayloads
 type JoinPayload struct {
 	Name string `json:"name"`
 }
@@ -27,7 +29,16 @@ type BuildPayload struct {
 	Y            int               `json:"y"`
 }
 
-// ServerPayloads
+type WelcomePayload struct {
+	PlayerID string `json:"playerId"`
+}
+
 type ErrorPayload struct {
+	Code    string `json:"code"`
 	Message string `json:"message"`
+}
+
+type outgoingMessage struct {
+	Type    string `json:"type"`
+	Payload any    `json:"payload"`
 }

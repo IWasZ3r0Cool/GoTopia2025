@@ -1,9 +1,16 @@
 package server
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
+	"io"
 	"log"
 	"net/http"
+	"net/url"
+	"os"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/IWasZ3r0Cool/GoTopia2025/internal/game"
@@ -11,163 +18,158 @@ import (
 )
 
 const (
-	// Time allowed to write a message to the peer.
-	writeWait = 10 * time.Second
-
-	// Time allowed to read the next pong message from the peer.
-	pongWait = 60 * time.Second
-
-	// Send pings to peer with this period. Must be less than pongWait.
-	pingPeriod = (pongWait * 9) / 10
-
-	// Maximum message size allowed from peer.
-	maxMessageSize = 512
+	writeWait      = 10 * time.Second
+	pongWait       = 60 * time.Second
+	pingPeriod     = (pongWait * 9) / 10
+	maxMessageSize = 4096
 )
 
 var upgrader = websocket.Upgrader{
-	ReadBufferSize:  1024,
-	WriteBufferSize: 1024,
-	CheckOrigin: func(r *http.Request) bool {
-		return true // Allow all origins for dev
-	},
+	ReadBufferSize: 1024, WriteBufferSize: 1024, CheckOrigin: originAllowed,
 }
 
-// Client is a middleman between the websocket connection and the hub.
 type Client struct {
 	Hub  *Hub
 	ID   string
 	conn *websocket.Conn
 	send chan []byte
+	done chan struct{}
+	once sync.Once
 }
 
-// readPump pumps messages from the websocket connection to the hub.
 func (c *Client) readPump() {
 	defer func() {
-		c.Hub.Unregister <- c
-		c.conn.Close()
+		c.Hub.removeClient(c)
+		c.closeConnection()
 	}()
 	c.conn.SetReadLimit(maxMessageSize)
-	c.conn.SetReadDeadline(time.Now().Add(pongWait))
-	c.conn.SetPongHandler(func(string) error { c.conn.SetReadDeadline(time.Now().Add(pongWait)); return nil })
+	_ = c.conn.SetReadDeadline(time.Now().Add(pongWait))
+	c.conn.SetPongHandler(func(string) error {
+		return c.conn.SetReadDeadline(time.Now().Add(pongWait))
+	})
 	for {
 		_, message, err := c.conn.ReadMessage()
 		if err != nil {
-			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				log.Printf("error: %v", err)
+			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseNormalClosure) {
+				log.Printf("read websocket: %v", err)
 			}
-			break
+			return
 		}
-
 		c.handleMessage(message)
 	}
 }
 
-func (c *Client) handleMessage(msg []byte) {
-	var base BaseMessage
-	if err := json.Unmarshal(msg, &base); err != nil {
-		log.Printf("Invalid JSON: %v", err)
+func (c *Client) handleMessage(message []byte) {
+	var envelope incomingMessage
+	if err := decodeStrict(message, &envelope); err != nil {
+		c.sendError("INVALID_MESSAGE", "Message must be valid JSON with known fields.")
 		return
 	}
 
-	switch base.Type {
+	switch envelope.Type {
 	case MsgJoinGame:
-		// Simple autojoin logic for now. ID should be generated or passed.
-		// For prototype, let's assume Client.ID is set on connection or we use payload.
-		// NOTE: AddPlayer should be called here.
-		if c.ID == "" {
-			// Generate valid ID or use payload
-			// Assuming payload has Name, use it as ID for now
-			var payload JoinPayload
-			// Re-marshal to get payload... naive but works.
-			// Better: map[string]interface{}
-			pBytes, _ := json.Marshal(base.Payload)
-			json.Unmarshal(pBytes, &payload)
-
-			if payload.Name != "" {
-				c.ID = payload.Name
-				c.Hub.GameEngine.AddPlayer(c.ID)
-
-				// Send initial state
-				c.sendState()
-			}
+		var payload JoinPayload
+		if err := decodeStrict(envelope.Payload, &payload); err != nil {
+			c.sendError("INVALID_JOIN", "Join requests require a player name.")
+			return
+		}
+		if err := c.Hub.joinGame(c, payload.Name); err != nil {
+			c.sendError(joinErrorCode(err), err.Error())
 		}
 
 	case MsgBuild:
 		if c.ID == "" {
+			c.sendError("NOT_JOINED", "Join the game before building.")
 			return
 		}
 		var payload BuildPayload
-		pBytes, _ := json.Marshal(base.Payload)
-		json.Unmarshal(pBytes, &payload)
-
-		success := c.Hub.GameEngine.HandleBuild(c.ID, payload.BuildingType, payload.X, payload.Y)
-		if success {
-			// Broadcast new state to ALL
-			c.Hub.BroadcastState()
-		} else {
-			// Send Error to Just This Client
-			c.sendError("Build Failed: Invalid location or insufficient funds")
+		if err := decodeStrict(envelope.Payload, &payload); err != nil {
+			c.sendError("INVALID_BUILD", "Build requests require a building type and coordinates.")
+			return
 		}
+		if err := c.Hub.engine.Build(c.ID, payload.BuildingType, payload.X, payload.Y); err != nil {
+			c.sendError(buildErrorCode(err), err.Error())
+		}
+
+	default:
+		c.sendError("UNKNOWN_MESSAGE", "Unknown message type.")
 	}
 }
 
-func (c *Client) sendState() {
-	state := c.Hub.GameEngine.GetState()
-	bytes, _ := json.Marshal(struct {
-		Type    string         `json:"type"`
-		Payload game.GameState `json:"payload"`
-	}{
-		Type:    MsgGameState,
-		Payload: state,
-	})
-	c.send <- bytes
+func decodeStrict(data []byte, target any) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return errors.New("message contains trailing data")
+	}
+	return nil
 }
 
-func (c *Client) sendError(msg string) {
-	bytes, _ := json.Marshal(struct {
-		Type    string       `json:"type"`
-		Payload ErrorPayload `json:"payload"`
-	}{
-		Type:    MsgError,
-		Payload: ErrorPayload{Message: msg},
-	})
-	c.send <- bytes
+func joinErrorCode(err error) string {
+	switch {
+	case errors.Is(err, game.ErrGameFull):
+		return "GAME_FULL"
+	case errors.Is(err, errAlreadyJoined):
+		return "ALREADY_JOINED"
+	default:
+		return "INVALID_JOIN"
+	}
 }
 
-// writePump pumps messages from the hub to the websocket connection.
+func buildErrorCode(err error) string {
+	switch {
+	case errors.Is(err, game.ErrOutsideIsland):
+		return "OUTSIDE_ISLAND"
+	case errors.Is(err, game.ErrTileOccupied):
+		return "TILE_OCCUPIED"
+	case errors.Is(err, game.ErrInsufficientGold):
+		return "INSUFFICIENT_GOLD"
+	case errors.Is(err, game.ErrInvalidBuilding):
+		return "INVALID_BUILDING"
+	default:
+		return "BUILD_FAILED"
+	}
+}
+
+func (c *Client) sendJSON(message outgoingMessage) {
+	encoded, err := json.Marshal(message)
+	if err != nil {
+		log.Printf("encode websocket message: %v", err)
+		return
+	}
+	select {
+	case c.send <- encoded:
+	case <-c.done:
+		return
+	default:
+		c.closeConnection()
+	}
+}
+
+func (c *Client) sendError(code, message string) {
+	c.sendJSON(outgoingMessage{Type: MsgError, Payload: ErrorPayload{Code: code, Message: message}})
+}
+
 func (c *Client) writePump() {
 	ticker := time.NewTicker(pingPeriod)
 	defer func() {
 		ticker.Stop()
-		c.conn.Close()
+		c.closeConnection()
 	}()
 	for {
 		select {
-		case message, ok := <-c.send:
-			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
-			if !ok {
-				// The hub closed the channel.
-				c.conn.WriteMessage(websocket.CloseMessage, []byte{})
-				return
-			}
-
-			w, err := c.conn.NextWriter(websocket.TextMessage)
-			if err != nil {
-				return
-			}
-			w.Write(message)
-
-			// Add queued chat messages to the current websocket message.
-			n := len(c.send)
-			for i := 0; i < n; i++ {
-				w.Write(<-c.send)
-			}
-
-			if err := w.Close(); err != nil {
+		case <-c.done:
+			return
+		case message := <-c.send:
+			_ = c.conn.SetWriteDeadline(time.Now().Add(writeWait))
+			if err := c.conn.WriteMessage(websocket.TextMessage, message); err != nil {
 				return
 			}
 		case <-ticker.C:
-			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
+			_ = c.conn.SetWriteDeadline(time.Now().Add(writeWait))
 			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
 				return
 			}
@@ -175,18 +177,44 @@ func (c *Client) writePump() {
 	}
 }
 
-// ServeWs handles websocket requests from the peer.
-func ServeWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
-	conn, err := upgrader.Upgrade(w, r, nil)
+func (c *Client) closeConnection() {
+	c.once.Do(func() {
+		close(c.done)
+		_ = c.conn.Close()
+	})
+}
+
+func ServeWS(hub *Hub, w http.ResponseWriter, r *http.Request) {
+	connection, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Println(err)
 		return
 	}
-	client := &Client{Hub: hub, conn: conn, send: make(chan []byte, 256)}
-	client.Hub.Register <- client
-
-	// Allow collection of memory referenced by the caller by doing all work in
-	// new goroutines.
+	client := &Client{Hub: hub, conn: connection, send: make(chan []byte, 64), done: make(chan struct{})}
+	if !hub.addClient(client) {
+		_ = connection.Close()
+		return
+	}
 	go client.writePump()
 	go client.readPump()
+}
+
+func originAllowed(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return true
+	}
+	for _, allowed := range strings.Split(os.Getenv("GOTOPIA_ALLOWED_ORIGINS"), ",") {
+		if strings.TrimSpace(allowed) == origin {
+			return true
+		}
+	}
+	parsed, err := url.Parse(origin)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil || (parsed.Path != "" && parsed.Path != "/") || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return false
+	}
+	requestScheme := "http"
+	if r.TLS != nil {
+		requestScheme = "https"
+	}
+	return strings.EqualFold(parsed.Scheme, requestScheme) && strings.EqualFold(parsed.Host, r.Host)
 }
